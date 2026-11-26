@@ -1,0 +1,256 @@
+﻿@model MYAcademy_AirbnbProject.Dtos.CategoryDtos.CreateCategoryDto
+
+@{
+    ViewData["Title"] = "Yeni Kategori";
+    Layout = "~/Views/AdminLayout/Index.cshtml";
+
+    // İkon seçenekleri: Key → veritabanına kaydedilen değer (Icon alanı).
+    // Yeni ikon eklemek için bu listeye bir satır eklemeniz yeterli.
+    var icons = new (string Key, string Label, string Svg)[]
+    {
+        ("home",     "Ev",        "<path d='M3.5 11L12 4l8.5 7M5.5 9.5V20h13V9.5M10 20v-5h4v5'/>"),
+        ("beach",    "Plaj",      "<path d='M4 11a8 8 0 0116 0H4z'/><path d='M12 11v8.5M3 20.5c2-1.2 4-1.2 6 0s4 1.2 6 0 4-1.2 6 0'/>"),
+        ("mountain", "Dağ",       "<path d='M2.5 19.5L9 8l4 7 2.5-4 6 8.5z'/><path d='M7.2 11.2L9 12.5l1.6-1.3'/>"),
+        ("city",     "Şehir",     "<path d='M4 20.5V8h6v12.5M10 20.5V4h7v16.5M17 20.5V11h3.5v9.5M2.5 20.5h19M6.5 11h1M6.5 14h1M6.5 17h1M12.5 7h2M12.5 10h2M12.5 13h2M12.5 16h2'/>"),
+        ("pool",     "Havuz",     "<path d='M8 15V5.5a2 2 0 014 0M16 15V5.5a2 2 0 00-4 0M8 9h8M8 12.5h8M3 18c1.5-1 3-1 4.5 0s3 1 4.5 0 3-1 4.5 0 3 1 4.5 0'/>"),
+        ("lake",     "Göl",       "<path d='M3 9c1.5-1 3-1 4.5 0s3 1 4.5 0 3-1 4.5 0 3 1 4.5 0M3 13.5c1.5-1 3-1 4.5 0s3 1 4.5 0 3-1 4.5 0 3 1 4.5 0M3 18c1.5-1 3-1 4.5 0s3 1 4.5 0 3-1 4.5 0 3 1 4.5 0'/>"),
+        ("forest",   "Orman",     "<path d='M12 3l5 7h-3l4 6H6l4-6H7l5-7zM12 16v5'/>"),
+        ("historic", "Tarihi",    "<path d='M3 9.5L12 4l9 5.5M4.5 9.5h15M6 9.5v8M10 9.5v8M14 9.5v8M18 9.5v8M4.5 17.5h15M3.5 20.5h17'/>"),
+        ("luxury",   "Lüks",      "<path d='M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3.5z'/>"),
+        ("family",   "Aile",      "<circle cx='9' cy='8' r='3.3'/><path d='M3 19.5c.9-3.1 3.2-4.8 6-4.8s5.1 1.7 6 4.8M16 4.9a3.2 3.2 0 010 6.2M18.3 14.8c1.5.7 2.4 2.2 2.8 4.7'/>"),
+        ("ski",      "Kayak",     "<path d='M12 3v18M4.2 7.5l15.6 9M4.2 16.5l15.6-9M9.5 4.5L12 6.5l2.5-2M9.5 19.5L12 17.5l2.5 2'/>"),
+        ("cabin",    "Kamp",      "<path d='M3 20.5L12 4l9 16.5zM9 20.5l3-5.5 3 5.5'/>")
+    };
+
+    var selectedIcon = Model?.Icon;
+    var isActive = Model?.IsActive ?? true;   // Yeni kategori varsayılan olarak aktif gelir
+}
+
+@await Component.InvokeAsync("_CreateCategoryStyleComponentPartial")
+
+<!-- ▼▼▼ Sayfa başlığı ▼▼▼ -->
+<section class="page-head">
+    <div>
+        <h1>Yeni Kategori</h1>
+        <p>Konaklamaların gruplanacağı yeni bir kategori oluşturun. Önizleme sağ tarafta anlık güncellenir.</p>
+    </div>
+    <div class="page-actions">
+        <a class="btn btn-ghost" asp-action="CategoryList">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6" /></svg>
+            Kategori Listesi
+        </a>
+    </div>
+</section>
+
+<div class="cc-grid">
+
+    <!-- ▼▼▼ Form ▼▼▼ -->
+    <form class="card" asp-action="CreateCategory" method="post" id="categoryForm" novalidate>
+        <div asp-validation-summary="ModelOnly" style="margin:20px 22px 0"></div>
+
+        <!-- Temel bilgiler -->
+        <div class="cc-section">
+            <div class="cc-section-head">
+                <h2>Temel bilgiler</h2>
+                <p>Kategori adı misafirlerin gördüğü kategori çubuğunda kullanılır.</p>
+            </div>
+
+            <div class="cc-field">
+                <label asp-for="CategoryName">Kategori adı<span class="req">*</span></label>
+                <input asp-for="CategoryName" class="input" placeholder="Örn. Sahil Kenarı" maxlength="50" required autocomplete="off" />
+                <div class="cc-hint-row">
+                    <span asp-validation-for="CategoryName"></span>
+                    <span class="cc-counter" data-counter-for="CategoryName" data-max="50">0/50</span>
+                </div>
+            </div>
+
+            <div class="cc-field">
+                <label asp-for="Description">Açıklama</label>
+                <textarea asp-for="Description" placeholder="Örn. Denize yürüme mesafesinde, manzaralı konaklamalar." maxlength="250"></textarea>
+                <div class="cc-hint-row">
+                    <span asp-validation-for="Description"></span>
+                    <span class="cc-counter" data-counter-for="Description" data-max="250">0/250</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- İkon -->
+        <div class="cc-section">
+            <div class="cc-section-head">
+                <h2>İkon<span style="color:var(--danger);margin-left:2px">*</span></h2>
+                <p>Kategoriyi temsil eden ikonu seçin.</p>
+            </div>
+            <fieldset class="cc-icons">
+                <legend class="sr-only">Kategori ikonu</legend>
+                @foreach (var icon in icons)
+                {
+                    <div class="cc-icon">
+                        <input type="radio" name="Icon" id="icon-@icon.Key" value="@icon.Key" checked="@(selectedIcon == icon.Key)" required />
+                        <label for="icon-@icon.Key" data-label="@icon.Label">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">@Html.Raw(icon.Svg)</svg>
+                            @icon.Label
+                        </label>
+                    </div>
+                }
+            </fieldset>
+            <span asp-validation-for="Icon" style="display:block;margin-top:8px"></span>
+        </div>
+
+        <!-- Durum -->
+        <div class="cc-section">
+            <div class="cc-section-head">
+                <h2>Yayın durumu</h2>
+            </div>
+            <label class="cc-switch" for="IsActive">
+                <span>
+                    <b id="activeTitle">@(isActive ? "Aktif" : "Pasif")</b>
+                    <small id="activeHint">@(isActive ? "Kategori misafirlere hemen gösterilir." : "Kategori kaydedilir ancak misafirlere gösterilmez.")</small>
+                </span>
+                <span class="cc-toggle">
+                    <input type="checkbox" id="IsActive" name="IsActive" value="true" checked="@isActive" />
+                    <span aria-hidden="true"></span>
+                </span>
+            </label>
+            <!-- Checkbox işaretli değilse "false" gönderilir -->
+            <input type="hidden" name="IsActive" value="false" />
+        </div>
+
+        <div class="cc-actions">
+            <a class="btn btn-ghost" asp-action="CategoryList">Vazgeç</a>
+            <button type="submit" class="btn btn-accent" id="saveBtn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+                Kategoriyi Kaydet
+            </button>
+        </div>
+    </form>
+
+    <!-- ▼▼▼ Önizleme ▼▼▼ -->
+    <aside class="cc-side" aria-label="Önizleme">
+        <section class="card">
+            <div class="card-head"><h2>Önizleme</h2><span class="meta">Misafir görünümü</span></div>
+            <div class="cc-preview">
+                <!-- Kategori çubuğu görünümü -->
+                <div class="cc-chips" aria-hidden="true">
+                    <span class="cc-chip">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 11L12 4l8.5 7M5.5 9.5V20h13V9.5M10 20v-5h4v5" /></svg>
+                        Tümü
+                    </span>
+                    <span class="cc-chip is-active">
+                        <span class="pv-icon-slot"></span>
+                        <b class="pv-name"></b>
+                    </span>
+                    <span class="cc-chip">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 19.5L9 8l4 7 2.5-4 6 8.5z" /></svg>
+                        Dağ
+                    </span>
+                </div>
+
+                <!-- Kart görünümü -->
+                <div class="cc-pv-card">
+                    <span class="cc-pv-icon pv-icon-slot"></span>
+                    <div class="cc-pv-body">
+                        <h3 class="pv-name"></h3>
+                        <p id="pvDesc"></p>
+                        <span class="badge" id="pvStatus"></span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="card cc-tips">
+            <h2>İpuçları</h2>
+            <ul>
+                <li>Kısa ve akılda kalıcı bir ad seçin (1–3 kelime).</li>
+                <li>Açıklama, kategorinin hangi konaklamaları kapsadığını anlatmalı.</li>
+                <li>Pasif kategoriler listede kalır, misafirlere gösterilmez.</li>
+            </ul>
+        </section>
+    </aside>
+</div>
+
+<script>
+    (function () {
+        "use strict";
+        var form = document.getElementById("categoryForm");
+        if (!form) return;
+
+        var nameInput = form.querySelector('[name="CategoryName"]');
+        var descInput = form.querySelector('[name="Description"]');
+        var activeInput = document.getElementById("IsActive");
+        var EMPTY_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-dasharray="2 3"><circle cx="12" cy="12" r="8"/></svg>';
+
+        function setText(el, value, placeholder) {
+            el.textContent = value || placeholder;
+            el.classList.toggle("cc-placeholder", !value);
+        }
+
+        function updateCounters() {
+            document.querySelectorAll("[data-counter-for]").forEach(function (c) {
+                var input = form.querySelector('[name="' + c.getAttribute("data-counter-for") + '"]');
+                var max = Number(c.getAttribute("data-max"));
+                var len = input.value.length;
+                c.textContent = len + "/" + max;
+                c.classList.toggle("is-near", len >= max * 0.9);
+            });
+        }
+
+        function updatePreview() {
+            var name = nameInput.value.trim();
+            var desc = descInput.value.trim();
+            document.querySelectorAll(".pv-name").forEach(function (el) { setText(el, name, "Kategori adı"); });
+            setText(document.getElementById("pvDesc"), desc, "Açıklama eklenmedi");
+
+            var checked = form.querySelector('input[name="Icon"]:checked');
+            var svg = checked ? form.querySelector('label[for="' + checked.id + '"] svg').outerHTML : EMPTY_ICON;
+            document.querySelectorAll(".pv-icon-slot").forEach(function (el) { el.innerHTML = svg; });
+
+            var on = activeInput.checked;
+            var badge = document.getElementById("pvStatus");
+            badge.className = "badge " + (on ? "b-ok" : "b-done");
+            badge.textContent = on ? "Aktif" : "Pasif";
+            document.getElementById("activeTitle").textContent = on ? "Aktif" : "Pasif";
+            document.getElementById("activeHint").textContent = on
+                ? "Kategori misafirlere hemen gösterilir."
+                : "Kategori kaydedilir ancak misafirlere gösterilmez.";
+
+            updateCounters();
+        }
+
+        form.addEventListener("input", updatePreview);
+        form.addEventListener("change", updatePreview);
+
+        // Basit istemci doğrulaması (DTO'da [Required] yoksa da boş gönderimi engeller)
+        form.addEventListener("submit", function (e) {
+            var errors = [];
+            if (!nameInput.value.trim()) errors.push({ el: nameInput, msg: "Kategori adı zorunludur." });
+            if (!form.querySelector('input[name="Icon"]:checked')) errors.push({ el: form.querySelector('input[name="Icon"]'), msg: "Lütfen bir ikon seçin." });
+
+            form.querySelectorAll(".cc-client-error").forEach(function (x) { x.remove(); });
+            nameInput.classList.remove("input-validation-error");
+
+            if (errors.length) {
+                e.preventDefault();
+                errors.forEach(function (err) {
+                    var msg = document.createElement("span");
+                    msg.className = "field-validation-error cc-client-error";
+                    msg.textContent = err.msg;
+                    if (err.el === nameInput) {
+                        nameInput.classList.add("input-validation-error");
+                        nameInput.closest(".cc-field").querySelector(".cc-hint-row").prepend(msg);
+                    } else {
+                        msg.style.display = "block"; msg.style.marginTop = "8px";
+                        form.querySelector(".cc-icons").after(msg);
+                    }
+                });
+                errors[0].el.focus();
+                return;
+            }
+            // Çift gönderimi engelle
+            var btn = document.getElementById("saveBtn");
+            btn.disabled = true;
+            btn.lastChild.textContent = " Kaydediliyor…";
+        });
+
+        updatePreview();
+    })();
+</script>

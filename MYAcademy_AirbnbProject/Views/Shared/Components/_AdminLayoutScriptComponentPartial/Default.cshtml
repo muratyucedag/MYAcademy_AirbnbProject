@@ -1,0 +1,569 @@
+﻿<script>
+    "use strict";
+    document.documentElement.classList.add("js-loading");
+
+    /* =====================================================================
+       [JS] VERİ — #tbody içindeki HTML satırlarından okunur
+       ---------------------------------------------------------------------
+       Veriyi düzenlemek için JS'e dokunmanız gerekmez; tablodaki <tr>
+       satırlarını değiştirin. Alan adları ileride GET /api/admin/reservations
+       yanıtı / MongoDB "reservations" koleksiyonu ile aynı tutulmuştur.
+       totalPrice = nightlyPrice × nights + cleaningFee + serviceFee
+       ===================================================================== */
+    const toNum = v => { const s = String(v == null ? "" : v).replace(/[^\d]/g, ""); return s ? Number(s) : NaN; };
+
+    /** Tablodaki ham satırları rezervasyon nesnelerine çevirir. */
+    function readReservationsFromTable(tbody) {
+      const defCleaning = toNum(tbody.dataset.cleaningFee) || 0;
+      const defService  = toNum(tbody.dataset.serviceFee) || 0;
+      const warnings = [];
+
+      const list = [...tbody.rows].map((tr, i) => {
+        const cell = k => tr.querySelector(`.c-${k}`);
+        const txt  = el => (el ? el.textContent : "").replace(/\s+/g, " ").trim();
+        const part = (k, sel) => txt(cell(k) && cell(k).querySelector(sel));
+
+        const id = txt(cell("id")) || `SATIR-${i + 1}`;
+        const [checkInDate = "", checkOutDate = ""] = cell("dates")
+          ? [...cell("dates").querySelectorAll("time")].map(t => (t.getAttribute("datetime") || t.textContent).trim())
+          : [];
+        const validDates = /^\d{4}-\d{2}-\d{2}$/.test(checkInDate) && /^\d{4}-\d{2}-\d{2}$/.test(checkOutDate);
+        const nights = validDates ? Math.round((parseISO(checkOutDate) - parseISO(checkInDate)) / 864e5) : 0;
+        if (!validDates || nights <= 0) warnings.push(`${id}: tarihler hatalı (${checkInDate} – ${checkOutDate}).`);
+
+        const amount = cell("amount");
+        const cleaningFee = amount && amount.dataset.cleaning !== undefined ? toNum(amount.dataset.cleaning) || 0 : defCleaning;
+        const serviceFee  = amount && amount.dataset.service  !== undefined ? toNum(amount.dataset.service)  || 0 : defService;
+        let totalPrice  = toNum(txt(amount));
+        let nightlyPrice = amount ? toNum(amount.dataset.nightly) : NaN;
+        if (isNaN(totalPrice) && !isNaN(nightlyPrice)) totalPrice = nightlyPrice * nights + cleaningFee + serviceFee;
+        if (isNaN(nightlyPrice) && !isNaN(totalPrice) && nights > 0) nightlyPrice = Math.round((totalPrice - cleaningFee - serviceFee) / nights);
+        if (isNaN(totalPrice)) { warnings.push(`${id}: toplam tutar okunamadı.`); totalPrice = 0; }
+        if (isNaN(nightlyPrice)) nightlyPrice = 0;
+        else if (nightlyPrice * nights + cleaningFee + serviceFee !== totalPrice)
+          warnings.push(`${id}: toplam (${totalPrice}) ≠ ${nightlyPrice} × ${nights} + ${cleaningFee} + ${serviceFee}.`);
+
+        const reservationStatus = txt(cell("status"));
+        const paymentStatus = txt(cell("pay"));
+        if (!RESERVATION_STATUSES.some(s => s.value === reservationStatus)) warnings.push(`${id}: bilinmeyen rezervasyon durumu "${reservationStatus}".`);
+        if (!PAYMENT_STATUSES.some(s => s.value === paymentStatus)) warnings.push(`${id}: bilinmeyen ödeme durumu "${paymentStatus}".`);
+
+        let createdAt = txt(cell("created")).replace(" ", "T");
+        if (/^\d{4}-\d{2}-\d{2}$/.test(createdAt)) createdAt += "T00:00";
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(createdAt)) { warnings.push(`${id}: oluşturulma tarihi hatalı.`); createdAt = "1970-01-01T00:00"; }
+        createdAt = createdAt.slice(0, 16) + ":00";
+
+        return {
+          reservationId: id,
+          guestName: part("guest", "b"), guestEmail: part("guest", "small"),
+          propertyName: part("prop", "b"), district: part("prop", "small"),
+          checkInDate, checkOutDate, nights,
+          guestCount: toNum(txt(cell("count"))) || 0,
+          nightlyPrice, cleaningFee, serviceFee, totalPrice,
+          reservationStatus, paymentStatus, createdAt,
+          notes: []
+        };
+      });
+
+      if (warnings.length) console.warn("[Stayholm] Tablo verisinde kontrol edilmesi gereken satırlar:\n" + warnings.join("\n"));
+      return list;
+    }
+
+    const RESERVATION_STATUSES = [
+      { value: "Onaylandı",    badge: "b-ok" },
+      { value: "Beklemede",    badge: "b-wait" },
+      { value: "Tamamlandı",   badge: "b-done" },
+      { value: "İptal Edildi", badge: "b-cancel" }
+    ];
+    const PAYMENT_STATUSES = [
+      { value: "Ödendi",      badge: "p-paid" },
+      { value: "Beklemede",   badge: "p-wait" },
+      { value: "İade Edildi", badge: "p-refund" }
+    ];
+    const PAGE_SIZE = 8;
+    const ADMIN = { name: "Selin Kaya", role: "Sistem Yöneticisi" };
+
+    /* =====================================================================
+       [JS] DURUM VE YARDIMCILAR
+       ===================================================================== */
+    const state = {
+      data: [],           // DOMContentLoaded'da tablodan okunur
+      filters: { q: "", status: "", payment: "", district: "", from: "", to: "" },
+      page: 1,
+      menuFor: null,      // işlem menüsünün açık olduğu rezervasyon
+      activeId: null      // modalda işlem yapılan rezervasyon
+    };
+
+    const $  = (s, el = document) => el.querySelector(s);
+    const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+    const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    const fmtNum = n => Number(n).toLocaleString("tr-TR");
+    const fmtSEK = n => `${fmtNum(n)} SEK`;
+    const norm = s => String(s).toLocaleLowerCase("tr").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\u0131/g, "i");
+    const parseISO = iso => { const [y, m, d] = iso.slice(0, 10).split("-").map(Number); return new Date(Date.UTC(y, m - 1, d)); };
+    const fmtDate = iso => parseISO(iso).toLocaleDateString("tr-TR", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+    const fmtTime = iso => iso.slice(11, 16);
+    /** "24 Ara – 27 Ara 2026"; yıl değişiyorsa her iki tarihte yıl gösterilir. */
+    const fmtRange = (a, b) => a.slice(0, 4) === b.slice(0, 4)
+      ? `${parseISO(a).toLocaleDateString("tr-TR", { day: "numeric", month: "short", timeZone: "UTC" })} – ${fmtDate(b)}`
+      : `${fmtDate(a)} – ${fmtDate(b)}`;
+    const findById = id => state.data.find(r => r.reservationId === id);
+    const statusMeta = v => RESERVATION_STATUSES.find(s => s.value === v) || RESERVATION_STATUSES[0];
+    const paymentMeta = v => PAYMENT_STATUSES.find(s => s.value === v) || PAYMENT_STATUSES[0];
+
+    const statusBadge = v => `<span class="badge ${statusMeta(v).badge}">${esc(v)}</span>`;
+    const PAY_ICON = {
+      "Ödendi": '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+      "Beklemede": '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 1.5"/>',
+      "İade Edildi": '<path d="M9 14L4.5 9.5 9 5M4.5 9.5h10a5 5 0 010 10H11"/>'
+    };
+    const paymentBadge = v => `<span class="pay ${paymentMeta(v).badge}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${PAY_ICON[v] || ""}</svg>${esc(v)}</span>`;
+
+    let toastTimer;
+    function toast(msg) {
+      $("#toastText").textContent = msg;
+      $("#toast").classList.add("is-visible");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => $("#toast").classList.remove("is-visible"), 3000);
+    }
+
+    /* =====================================================================
+       [JS] _AdminSidebar + _AdminTopbar
+       ===================================================================== */
+    const SB_KEY = "stayholm.admin.sidebarCollapsed";
+    const isMobile = () => window.matchMedia("(max-width:900px)").matches;
+
+    function setSidebarCollapsed(collapsed, persist = true) {
+      document.body.classList.toggle("sb-collapsed", collapsed);
+      const t = $("#sbToggle");
+      t.setAttribute("aria-expanded", String(!collapsed));
+      t.setAttribute("aria-label", collapsed ? "Menüyü genişlet" : "Menüyü daralt");
+      if (persist) { try { localStorage.setItem(SB_KEY, collapsed ? "1" : "0"); } catch (e) {} }
+    }
+    function setDrawer(open) {
+      document.body.classList.toggle("sb-open", open);
+      document.body.classList.toggle("no-scroll", open);
+      $("#sbBackdrop").classList.toggle("is-visible", open);
+      const t = $("#sbToggle");
+      t.setAttribute("aria-expanded", String(open));
+      t.setAttribute("aria-label", open ? "Menüyü kapat" : "Menüyü aç");
+    }
+
+    function initLayout() {
+      // Başlangıç: kayıtlı tercih yoksa 1480 px altında daraltılmış başla (tablo tam sığsın)
+      let stored = null;
+      try { stored = localStorage.getItem(SB_KEY); } catch (e) {}
+      const collapsed = stored === null ? window.innerWidth < 1480 : stored === "1";
+      setSidebarCollapsed(collapsed, false);
+      if (isMobile()) setDrawer(false);
+
+      $("#sbToggle").addEventListener("click", () => {
+        if (isMobile()) setDrawer(!document.body.classList.contains("sb-open"));
+        else setSidebarCollapsed(!document.body.classList.contains("sb-collapsed"));
+      });
+      $("#sbBackdrop").addEventListener("click", () => setDrawer(false));
+      window.addEventListener("resize", () => {
+        if (!isMobile() && document.body.classList.contains("sb-open")) setDrawer(false);
+        if (!isMobile()) $("#sbToggle").setAttribute("aria-expanded", String(!document.body.classList.contains("sb-collapsed")));
+      });
+
+      // Henüz hazırlanmamış menüler
+      $$("[data-soon]").forEach(el => el.addEventListener("click", e => {
+        e.preventDefault();
+        const name = el.getAttribute("title") || "Bu bölüm";
+        toast(`${name} ekranı henüz hazırlanmadı.`);
+        if (isMobile()) setDrawer(false);
+      }));
+      $("#logoutBtn").addEventListener("click", () => toast("Oturum yönetimi henüz eklenmedi."));
+      $("#newReservationBtn").addEventListener("click", () => toast("Rezervasyon oluşturma ekranı henüz hazırlanmadı."));
+      $("#notifBtn").addEventListener("click", () => {
+        const n = state.data.filter(r => r.reservationStatus === "Beklemede").length;
+        toast(n ? `Onay bekleyen ${n} rezervasyon var.` : "Yeni bildiriminiz yok.");
+      });
+
+      // Üst bar araması tablo aramasıyla senkron
+      const top = $("#topSearch"), inner = $("#fSearch");
+      top.addEventListener("input", () => { inner.value = top.value; onFilterChange(); });
+      document.addEventListener("keydown", e => {
+        if (e.key === "/" && !/input|textarea|select/i.test(document.activeElement.tagName) && !document.querySelector(".modal.is-open")) {
+          e.preventDefault(); (isMobile() ? inner : top).focus();
+        }
+      });
+    }
+
+    /* =====================================================================
+       [JS] _StatCards — istatistikler tüm veriden hesaplanır
+       ===================================================================== */
+    function computeStats(rows) {
+      const by = s => rows.filter(r => r.reservationStatus === s).length;
+      const paid = rows.filter(r => r.paymentStatus === "Ödendi");
+      return {
+        total: rows.length,
+        confirmed: by("Onaylandı"),
+        pending: by("Beklemede"),
+        completed: by("Tamamlandı"),
+        cancelled: by("İptal Edildi"),
+        revenue: paid.reduce((sum, r) => sum + r.totalPrice, 0),
+        paidCount: paid.length,
+        awaitingPayment: rows.filter(r => r.paymentStatus === "Beklemede" && r.reservationStatus !== "İptal Edildi").length,
+        refunded: rows.filter(r => r.paymentStatus === "İade Edildi").length
+      };
+    }
+    function pct(a, b) { return b ? Math.round((a / b) * 100) : 0; }
+
+    function renderStats() {
+      const s = computeStats(state.data);
+      const set = (k, html) => { $(`[data-stat="${k}"]`).innerHTML = html; };
+      const note = (k, html) => { $(`[data-stat-note="${k}"]`).innerHTML = html; };
+      set("total", fmtNum(s.total));
+      note("total", `<b>${s.completed}</b> tamamlanmış konaklama`);
+      set("confirmed", fmtNum(s.confirmed));
+      note("confirmed", `Tüm kayıtların <b>%${pct(s.confirmed, s.total)}</b>'i`);
+      set("pending", fmtNum(s.pending));
+      note("pending", `<b>${s.awaitingPayment}</b> ödeme bekleniyor`);
+      set("cancelled", fmtNum(s.cancelled));
+      note("cancelled", `<b>${s.refunded}</b> iade yapıldı`);
+      set("revenue", `${fmtNum(s.revenue)}<small>SEK</small>`);
+      note("revenue", `<b>${s.paidCount}</b> ödenmiş rezervasyondan`);
+
+      $("#sbCancelCount").textContent = s.cancelled;
+      const dot = $("#notifDot");
+      dot.textContent = s.pending; dot.hidden = s.pending === 0;
+      $("#notifBtn").setAttribute("aria-label", `Bildirimler (${s.pending} bekleyen rezervasyon)`);
+    }
+
+    /* =====================================================================
+       [JS] _ReservationTable — filtre, tablo, sayfalama
+       ===================================================================== */
+    /** Tüm filtreleri tek noktadan uygular. Gruplar arası VE mantığı. */
+    function applyFilters(rows, f) {
+      const q = norm(f.q.trim());
+      let from = f.from, to = f.to;
+      if (from && to && from > to) [from, to] = [to, from];
+      return rows.filter(r => {
+        if (q && !norm(`${r.reservationId} ${r.guestName} ${r.propertyName}`).includes(q)) return false;
+        if (f.status && r.reservationStatus !== f.status) return false;
+        if (f.payment && r.paymentStatus !== f.payment) return false;
+        if (f.district && r.district !== f.district) return false;
+        // Tarih aralığı: konaklama seçilen aralıkla kesişiyorsa listelenir
+        if (from && r.checkOutDate <= from) return false;
+        if (to && r.checkInDate > to) return false;
+        return true;
+      });
+    }
+
+    function rowHTML(r) {
+      const nights = r.nights;
+      return `<tr data-id="${r.reservationId}">
+        <td class="c-id"><span class="rid">${r.reservationId}</span></td>
+        <td class="c-guest" data-label="Misafir"><div class="two-line"><b>${esc(r.guestName)}</b><small>${esc(r.guestEmail)}</small></div></td>
+        <td class="c-prop" data-label="Konaklama"><div class="two-line"><b>${esc(r.propertyName)}</b><small>${esc(r.district)}</small></div></td>
+        <td class="c-dates" data-label="Tarihler"><div class="dates" title="${fmtDate(r.checkInDate)} – ${fmtDate(r.checkOutDate)}">${fmtRange(r.checkInDate, r.checkOutDate)}<small>${nights} gece</small></div></td>
+        <td class="c-count t-center" data-label="Misafir"><span class="guests"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c1-3.6 3.8-5.4 7-5.4s6 1.8 7 5.4"/></svg>${r.guestCount}</span></td>
+        <td class="c-amount t-right" data-label="Toplam tutar"><span class="amount">${fmtSEK(r.totalPrice)}</span></td>
+        <td class="c-status" data-label="Rezervasyon">${statusBadge(r.reservationStatus)}</td>
+        <td class="c-pay" data-label="Ödeme">${paymentBadge(r.paymentStatus)}</td>
+        <td class="c-created" data-label="Oluşturulma"><div class="created">${fmtDate(r.createdAt)}<small>${fmtTime(r.createdAt)}</small></div></td>
+        <td class="c-act t-center"><button type="button" class="row-menu-btn" data-menu="${r.reservationId}" aria-haspopup="menu" aria-expanded="false" aria-controls="rowMenu" aria-label="${r.reservationId} için işlemler">
+          <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5.5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="18.5" r="1.7"/></svg></button></td>
+      </tr>`;
+    }
+
+    function renderTable({ highlight } = {}) {
+      const filtered = applyFilters(state.data, state.filters)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      const total = filtered.length;
+      const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+      state.page = Math.min(Math.max(1, state.page), pages);
+      const start = (state.page - 1) * PAGE_SIZE;
+      const items = filtered.slice(start, start + PAGE_SIZE);
+
+      $("#tbody").innerHTML = items.map(rowHTML).join("");
+      $("#table").classList.add("is-ready");
+      $("#table").hidden = total === 0;
+      $("#emptyState").hidden = total !== 0;
+      $("#pager").hidden = total === 0;
+      $("#resultCount").textContent = total;
+
+      $("#pagerInfo").innerHTML = total
+        ? `<b>${start + 1}–${start + items.length}</b> arası gösteriliyor · toplam <b>${total}</b> kayıt`
+        : "";
+      let nav = `<button type="button" class="pg" data-page="${state.page - 1}" ${state.page === 1 ? "disabled" : ""} aria-label="Önceki sayfa">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg><span class="t">Önceki</span></button>`;
+      for (let i = 1; i <= pages; i++) nav += `<button type="button" class="pg" data-page="${i}" ${i === state.page ? 'aria-current="page"' : ""} aria-label="Sayfa ${i}">${i}</button>`;
+      nav += `<button type="button" class="pg" data-page="${state.page + 1}" ${state.page === pages ? "disabled" : ""} aria-label="Sonraki sayfa">
+          <span class="t">Sonraki</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>`;
+      $("#pagerNav").innerHTML = nav;
+
+      // Filtre alanlarında seçili olanları vurgula
+      $$("#filters .select").forEach(s => s.classList.toggle("is-set", !!s.value));
+      $$("#filters input[type=date]").forEach(s => s.classList.toggle("is-set", !!s.value));
+
+      if (highlight) {
+        const tr = $(`#tbody tr[data-id="${highlight}"]`);
+        if (tr) { tr.classList.add("is-updated"); setTimeout(() => tr.classList.remove("is-updated"), 1600); }
+      }
+    }
+
+    function readFilters() {
+      state.filters = {
+        q: $("#fSearch").value,
+        status: $("#fStatus").value,
+        payment: $("#fPayment").value,
+        district: $("#fDistrict").value,
+        from: $("#fFrom").value,
+        to: $("#fTo").value
+      };
+    }
+    function onFilterChange() { readFilters(); state.page = 1; closeMenu(); renderTable(); }
+
+    function clearFilters() {
+      $("#filters").reset();
+      $("#topSearch").value = "";
+      onFilterChange();
+    }
+
+    function initTable() {
+      // Filtre seçenekleri veriden üretilir
+      RESERVATION_STATUSES.forEach(s => $("#fStatus").insertAdjacentHTML("beforeend", `<option>${s.value}</option>`));
+      PAYMENT_STATUSES.forEach(s => $("#fPayment").insertAdjacentHTML("beforeend", `<option>${s.value}</option>`));
+      [...new Set(state.data.map(r => r.district).filter(Boolean))].sort((a, b) => a.localeCompare(b, "sv"))
+        .forEach(d => $("#fDistrict").insertAdjacentHTML("beforeend", `<option>${esc(d)}</option>`));
+
+      let t;
+      $("#fSearch").addEventListener("input", () => {
+        $("#topSearch").value = $("#fSearch").value;
+        clearTimeout(t); t = setTimeout(onFilterChange, 120);
+      });
+      ["#fStatus", "#fPayment", "#fDistrict", "#fFrom", "#fTo"].forEach(s => $(s).addEventListener("change", onFilterChange));
+      $("#clearFilters").addEventListener("click", clearFilters);
+      document.addEventListener("click", e => { if (e.target.closest("[data-clear-filters]")) clearFilters(); });
+
+      $("#pagerNav").addEventListener("click", e => {
+        const b = e.target.closest("[data-page]");
+        if (!b || b.disabled) return;
+        state.page = Number(b.dataset.page);
+        closeMenu();
+        renderTable();
+        $("#tableTitle").scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+
+      $("#tbody").addEventListener("click", e => {
+        const b = e.target.closest("[data-menu]");
+        if (b) openMenu(b);
+      });
+    }
+
+    /* =====================================================================
+       [JS] _AdminUi — satır işlem menüsü
+       ===================================================================== */
+    let menuBtn = null;
+    function openMenu(btn) {
+      const id = btn.dataset.menu;
+      if (state.menuFor === id) { closeMenu(); return; }
+      closeMenu();
+      const r = findById(id);
+      const menu = $("#rowMenu");
+      const ended = r.reservationStatus === "İptal Edildi" || r.reservationStatus === "Tamamlandı";
+      const cancelBtn = $('[data-action="cancel"]', menu);
+      cancelBtn.disabled = ended;
+      cancelBtn.title = ended ? `${r.reservationStatus} durumundaki rezervasyon iptal edilemez.` : "";
+
+      menu.classList.add("is-open");
+      const rect = btn.getBoundingClientRect();
+      const mw = menu.offsetWidth, mh = menu.offsetHeight;
+      let left = rect.right - mw;
+      let top = rect.bottom + 6;
+      if (top + mh > window.innerHeight - 8) top = rect.top - mh - 6;     // aşağıya sığmazsa yukarı aç
+      left = Math.max(8, Math.min(left, window.innerWidth - mw - 8));
+      menu.style.left = `${left}px`; menu.style.top = `${top}px`;
+
+      state.menuFor = id; menuBtn = btn;
+      btn.setAttribute("aria-expanded", "true");
+      $("button:not(:disabled)", menu).focus();
+    }
+    function closeMenu({ restoreFocus = false } = {}) {
+      $("#rowMenu").classList.remove("is-open");
+      if (menuBtn) { menuBtn.setAttribute("aria-expanded", "false"); if (restoreFocus) menuBtn.focus(); }
+      state.menuFor = null; menuBtn = null;
+    }
+
+    function initMenu() {
+      const menu = $("#rowMenu");
+      menu.addEventListener("click", e => {
+        const b = e.target.closest("[data-action]");
+        if (!b || b.disabled) return;
+        const id = state.menuFor;
+        closeMenu();
+        ({ detail: openDetail, status: openStatus, cancel: openCancel, note: openNote })[b.dataset.action](id);
+      });
+      menu.addEventListener("keydown", e => {
+        const items = $$("button:not(:disabled)", menu);
+        const i = items.indexOf(document.activeElement);
+        if (e.key === "ArrowDown") { e.preventDefault(); items[(i + 1) % items.length].focus(); }
+        if (e.key === "ArrowUp") { e.preventDefault(); items[(i - 1 + items.length) % items.length].focus(); }
+        if (e.key === "Tab") closeMenu();
+      });
+      document.addEventListener("click", e => {
+        if (state.menuFor && !e.target.closest("#rowMenu") && !e.target.closest("[data-menu]")) closeMenu();
+      });
+      window.addEventListener("resize", () => closeMenu());
+      document.addEventListener("scroll", () => closeMenu(), true);
+    }
+
+    /* =====================================================================
+       [JS] _Modals
+       ===================================================================== */
+    let modalReturnFocus = null;
+    function openModal(id) {
+      modalReturnFocus = document.activeElement;
+      const m = document.getElementById(id);
+      m.classList.add("is-open");
+      m.setAttribute("aria-hidden", "false");
+      document.body.classList.add("no-scroll");
+      const focusable = m.querySelector("select, textarea, .dialog-foot .btn:last-child");
+      (focusable || m.querySelector("[data-close]")).focus();
+    }
+    function closeModal(m = document.querySelector(".modal.is-open")) {
+      if (!m) return;
+      m.classList.remove("is-open");
+      m.setAttribute("aria-hidden", "true");
+      if (!document.querySelector(".modal.is-open")) document.body.classList.remove("no-scroll");
+      const back = modalReturnFocus && document.contains(modalReturnFocus) ? modalReturnFocus : $(`[data-menu="${state.activeId}"]`);
+      if (back) back.focus();
+    }
+
+    function summaryHTML(r) {
+      return `<span class="rid">${r.reservationId}</span><span>${esc(r.guestName)} · ${esc(r.propertyName)}</span>`;
+    }
+
+    function openDetail(id) {
+      const r = findById(id); state.activeId = id;
+      $("#detailTitle").textContent = `Rezervasyon ${r.reservationId}`;
+      $("#detailSub").textContent = `${fmtDate(r.createdAt)} ${fmtTime(r.createdAt)} tarihinde oluşturuldu`;
+      const notes = r.notes.length
+        ? `<div class="notes"><h3>Yönetici notları</h3>${r.notes.map(n => `<div class="note">${esc(n.text)}<small>${esc(n.author)} · ${fmtDate(n.createdAt)} ${fmtTime(n.createdAt)}</small></div>`).join("")}</div>`
+        : "";
+      $("#detailBody").innerHTML = `
+        <div class="detail-badges">${statusBadge(r.reservationStatus)}${paymentBadge(r.paymentStatus)}</div>
+        <dl class="dl">
+          <div><dt>Misafir</dt><dd>${esc(r.guestName)}</dd></div>
+          <div><dt>E-posta</dt><dd>${esc(r.guestEmail)}</dd></div>
+          <div><dt>Konaklama</dt><dd>${esc(r.propertyName)}</dd></div>
+          <div><dt>Bölge</dt><dd>${esc(r.district)}, Stockholm</dd></div>
+          <div><dt>Giriş</dt><dd>${fmtDate(r.checkInDate)}</dd></div>
+          <div><dt>Çıkış</dt><dd>${fmtDate(r.checkOutDate)}</dd></div>
+          <div><dt>Gece</dt><dd>${r.nights} gece</dd></div>
+          <div><dt>Misafir sayısı</dt><dd>${r.guestCount} kişi</dd></div>
+        </dl>
+        <div class="price-box">
+          <div><span>${fmtSEK(r.nightlyPrice)} × ${r.nights} gece</span><span>${fmtSEK(r.nightlyPrice * r.nights)}</span></div>
+          <div><span>Temizlik ücreti</span><span>${fmtSEK(r.cleaningFee)}</span></div>
+          <div><span>Hizmet bedeli</span><span>${fmtSEK(r.serviceFee)}</span></div>
+          <div class="total"><span>Toplam</span><span>${fmtSEK(r.totalPrice)}</span></div>
+        </div>${notes}`;
+      openModal("detailModal");
+    }
+
+    function openStatus(id) {
+      const r = findById(id); state.activeId = id;
+      $("#statusSub").textContent = "Rezervasyon ve ödeme durumunu değiştirin.";
+      $("#statusSummary").innerHTML = summaryHTML(r);
+      $("#statusSelect").innerHTML = RESERVATION_STATUSES.map(s => `<option ${s.value === r.reservationStatus ? "selected" : ""}>${s.value}</option>`).join("");
+      $("#paymentSelect").innerHTML = PAYMENT_STATUSES.map(s => `<option ${s.value === r.paymentStatus ? "selected" : ""}>${s.value}</option>`).join("");
+      openModal("statusModal");
+    }
+
+    function openCancel(id) {
+      const r = findById(id); state.activeId = id;
+      $("#cancelSummary").innerHTML = summaryHTML(r);
+      $("#cancelText").textContent = r.paymentStatus === "Ödendi"
+        ? `Bu rezervasyon iptal edilecek ve ödeme durumu "İade Edildi" olarak işaretlenecek (${fmtSEK(r.totalPrice)}). Bu işlem geri alınamaz.`
+        : "Bu rezervasyon iptal edilecek. Henüz ödeme alınmadığı için iade işlemi gerekmiyor. Bu işlem geri alınamaz.";
+      openModal("cancelModal");
+    }
+
+    function openNote(id) {
+      const r = findById(id); state.activeId = id;
+      $("#noteSub").textContent = `${r.reservationId} · ${r.guestName}`;
+      $("#noteText").value = ""; $("#noteCount").textContent = "0";
+      openModal("noteModal");
+    }
+
+    /** Bir rezervasyonu günceller; ileride PATCH /api/admin/reservations/{id} çağrısı buraya gelir. */
+    function updateReservation(id, patch, message) {
+      Object.assign(findById(id), patch);
+      renderStats();
+      renderTable({ highlight: id });
+      toast(message);
+    }
+
+    function initModals() {
+      $$(".modal").forEach(m => {
+        m.addEventListener("click", e => { if (e.target === m || e.target.closest("[data-close]")) closeModal(m); });
+        // Basit odak tuzağı
+        m.addEventListener("keydown", e => {
+          if (e.key !== "Tab") return;
+          const f = $$("button:not(:disabled), select, textarea, input", m).filter(x => x.offsetParent !== null);
+          if (!f.length) return;
+          if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
+          else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
+        });
+      });
+      document.addEventListener("keydown", e => {
+        if (e.key !== "Escape") return;
+        if (document.querySelector(".modal.is-open")) closeModal();
+        else if (state.menuFor) closeMenu({ restoreFocus: true });
+        else if (document.body.classList.contains("sb-open")) setDrawer(false);
+      });
+
+      $("#detailToStatus").addEventListener("click", () => { const id = state.activeId; closeModal(); openStatus(id); });
+
+      $("#statusForm").addEventListener("submit", e => {
+        e.preventDefault();
+        const id = state.activeId, r = findById(id);
+        const status = $("#statusSelect").value, payment = $("#paymentSelect").value;
+        if (status === r.reservationStatus && payment === r.paymentStatus) { closeModal(); toast("Herhangi bir değişiklik yapılmadı."); return; }
+        closeModal();
+        updateReservation(id, { reservationStatus: status, paymentStatus: payment }, `${id} güncellendi: ${status} · ${payment}`);
+      });
+
+      $("#confirmCancel").addEventListener("click", () => {
+        const id = state.activeId, r = findById(id);
+        const patch = { reservationStatus: "İptal Edildi" };
+        if (r.paymentStatus === "Ödendi") patch.paymentStatus = "İade Edildi";
+        closeModal();
+        updateReservation(id, patch, `${id} iptal edildi.`);
+      });
+
+      $("#noteText").addEventListener("input", e => { $("#noteCount").textContent = e.target.value.length; });
+      $("#noteForm").addEventListener("submit", e => {
+        e.preventDefault();
+        const text = $("#noteText").value.trim();
+        if (!text) { $("#noteText").focus(); toast("Lütfen bir not yazın."); return; }
+        const id = state.activeId;
+        const now = new Date();
+        const pad = n => String(n).padStart(2, "0");
+        const createdAt = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`;
+        findById(id).notes.push({ text, author: ADMIN.name, createdAt });
+        closeModal();
+        toast(`${id} için not eklendi.`);
+      });
+    }
+
+    /* =====================================================================
+       [JS] BAŞLAT
+       ===================================================================== */
+    document.addEventListener("DOMContentLoaded", () => {
+      // Her adım ayrı çalışır: biri hata verse bile diğerleri (kartlar, tablo) çalışmaya devam eder
+      const step = (name, fn) => { try { fn(); } catch (err) { console.error(`[Stayholm] ${name} çalıştırılamadı:`, err); } };
+      step("Tablo verisi", () => { state.data = readReservationsFromTable($("#tbody")); });
+      step("Menü ve üst bar", initLayout);
+      step("Filtreler", initTable);
+      step("İşlem menüsü", initMenu);
+      step("Pencereler", initModals);
+      if (state.data.length) step("Özet kartları", renderStats);   // veri okunamadıysa HTML'deki değerler kalır
+      if (state.data.length) step("Tablo", renderTable);       // veri okunamadıysa HTML satırları olduğu gibi görünür
+      document.documentElement.classList.remove("js-loading");
+    });
+</script>
